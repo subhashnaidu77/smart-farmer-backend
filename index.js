@@ -16,20 +16,17 @@ app.use(express.json());
 const ERCASPAY_SECRET_KEY = process.env.ERCASPAY_SECRET_KEY;
 const API_BASE_URL = 'https://api.paystack.co';
 
-// --- PAYMENT ENDPOINTS ---
 app.post('/payment/initialize', async (req, res) => {
     try {
-        // We now receive the callbackUrl from the frontend
         const { email, amount, callbackUrl } = req.body;
-
         const response = await axios.post(`${API_BASE_URL}/transaction/initialize`, {
             email: email,
             amount: Math.round(amount * 100),
-            callback_url: callbackUrl // Use the URL sent from the frontend
+            callback_url: callbackUrl,
+            currency: "NGN" // Explicitly set currency to NGN
         }, {
             headers: { Authorization: `Bearer ${ERCASPAY_SECRET_KEY}` }
         });
-        
         res.status(200).json(response.data);
     } catch (error) {
         console.error('Payment Initialization Error:', error.response ? error.response.data : error.message);
@@ -60,7 +57,6 @@ app.get('/payment/verify/:reference', async (req, res) => {
     }
 });
 
-// --- ADMIN APIs ---
 app.get('/admin/users', async (req, res) => {
     try {
         const userRecords = await admin.auth().listUsers(1000);
@@ -72,6 +68,7 @@ app.get('/admin/users', async (req, res) => {
         res.status(200).json(users);
     } catch (error) { res.status(500).json({ message: 'Failed to list users.' }); }
 });
+
 app.post('/admin/users/setrole', async (req, res) => {
     try {
         const { uid, role } = req.body;
@@ -80,6 +77,7 @@ app.post('/admin/users/setrole', async (req, res) => {
         res.status(200).json({ message: `Successfully set user role to ${role}` });
     } catch (error) { res.status(500).json({ message: 'Failed to set user role.' }); }
 });
+
 app.delete('/admin/users/:uid', async (req, res) => {
     try {
         const { uid } = req.params;
@@ -88,6 +86,7 @@ app.delete('/admin/users/:uid', async (req, res) => {
         res.status(200).json({ message: 'User deleted successfully.' });
     } catch (error) { res.status(500).json({ message: 'Failed to delete user.' }); }
 });
+
 app.get('/admin/withdrawals', async (req, res) => {
     try {
         const snapshot = await db.collection('withdrawals').orderBy('createdAt', 'desc').get();
@@ -95,6 +94,7 @@ app.get('/admin/withdrawals', async (req, res) => {
         res.status(200).json(withdrawals);
     } catch (error) { res.status(500).json({ message: 'Failed to fetch withdrawal requests.' }); }
 });
+
 app.post('/admin/withdrawals/update', async (req, res) => {
     try {
         const { id, status } = req.body;
@@ -106,6 +106,7 @@ app.post('/admin/withdrawals/update', async (req, res) => {
         if (status === 'approved') {
             const withdrawalData = withdrawalDoc.data();
             const { amount, userId } = withdrawalData;
+            console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
             const userRef = db.collection('users').doc(userId);
             const userDoc = await userRef.get();
             if (!userDoc.exists) { return res.status(404).json({ message: 'User not found.' }); }
@@ -116,6 +117,7 @@ app.post('/admin/withdrawals/update', async (req, res) => {
             await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
             await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
             await db.collection('transactions').add({ userId: userId, type: 'Withdrawal', amount: amount, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Withdrawal to ${withdrawalData.bankDetails.bankName}` });
+            console.log(`--- PAYOUT SIMULATION FOR USER ${userId} SUCCEEDED ---`);
         } else {
             await withdrawalRef.update({ status: status });
         }
@@ -125,6 +127,7 @@ app.post('/admin/withdrawals/update', async (req, res) => {
         res.status(500).json({ message: 'Failed to process withdrawal request.' });
     }
 });
+
 app.get('/admin/transactions', async (req, res) => {
     try {
         const snapshot = await db.collection('transactions').orderBy('createdAt', 'desc').get();
@@ -138,7 +141,6 @@ app.get('/admin/transactions', async (req, res) => {
     } catch (error) { res.status(500).json({ message: 'Failed to fetch transactions.' }); }
 });
 
-// --- SYSTEM APIs ---
 app.post('/system/process-payouts', async (req, res) => {
     try {
         const now = new Date();
@@ -170,7 +172,10 @@ app.post('/system/process-payouts', async (req, res) => {
         const message = `Payout process completed. Processed ${processedCount} matured investments.`;
         console.log(message);
         res.status(200).json({ message });
-    } catch (error) { res.status(500).json({ message: 'An error occurred during payout processing.' }); }
+    } catch (error) {
+        console.error('Error processing payouts:', error);
+        res.status(500).json({ message: 'An error occurred during payout processing.' });
+    }
 });
 
 app.get('/', (req, res) => res.send('Smart Farmer Backend is LIVE!'));
