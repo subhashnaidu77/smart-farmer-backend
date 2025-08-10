@@ -20,7 +20,7 @@ app.use(express.json());
 // We now use the VELVPAY key from your .env file
 const VELVPAY_SECRET_KEY = process.env.VELVPAY_SECRET_KEY; 
 // This is the assumed API URL for VelvPay. Please verify from their official documentation.
-const API_BASE_URL = 'https://api.velvpay.com/api/v1/service'; 
+const API_BASE_URL = 'https://api.velvpay.com/v1'; 
 
 console.log("Backend configured for VelvPay.");
 
