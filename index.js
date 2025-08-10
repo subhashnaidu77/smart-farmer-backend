@@ -12,10 +12,11 @@ const db = admin.firestore();
 const app = express();
 app.use(cors());
 app.use(express.json());
+const VELVPAY_SECRET_KEY = process.env.VELVPAY_SECRET_KEY; 
+// This is the assumed API URL for VelvPay. Please verify from their official documentation.
+const API_BASE_URL = 'https://api.velvpay.com/v1'; 
 
-const ERCASPAY_SECRET_KEY = process.env.ERCASPAY_SECRET_KEY;
-const API_BASE_URL = 'https://api.paystack.co';
-
+console.log("Backend configured for VelvPay.");
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
@@ -25,7 +26,7 @@ app.post('/payment/initialize', async (req, res) => {
             callback_url: callbackUrl,
             currency: "NGN" // Explicitly set currency to NGN
         }, {
-            headers: { Authorization: `Bearer ${ERCASPAY_SECRET_KEY}` }
+            headers: { Authorization: `Bearer ${VELVPAY_SECRET_KEY}` }
         });
         res.status(200).json(response.data);
     } catch (error) {
