@@ -59,14 +59,14 @@ app.post('/payment/initialize', async (req, res) => {
         
         const headers = generateVelvPayHeaders();
 
-        const response = await axios.post(`${API_BASE_URL}/payment/cash-craft/initiate`, payload, { headers });
+        const response = await axios.post(`${API_BASE_URL}/payment/initiate`, payload, { headers });
         
         // Adapt the response to provide a payment link to the frontend
         // VelvPay's response structure might be different, this is an assumption
         const paymentData = {
-            authorization_url: response.data.data.link || `https://some-velvpay-payment-page.com/${response.data.data.reference}`,
-            access_code: response.data.data.reference,
-            reference: response.data.data.reference
+            authorization_url: response.data.data.link || `https://velvpay.com/pay/${response.data.data.short}`,
+            // access_code: response.data.data.reference,
+            // reference: response.data.data.reference
         };
 
         res.status(200).json({ status: true, message: "Authorization URL created", data: paymentData });
