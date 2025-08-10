@@ -79,7 +79,7 @@ app.get('/payment/verify/:reference', async (req, res) => {
 });
 
 
-// B. ADMIN & SYSTEM ENDPOINTS (No changes needed in these sections)
+// B. ADMIN & SYSTEM ENDPOINTS (These sections have no changes)
 app.get('/admin/users', async (req, res) => {
     try {
         const userRecords = await admin.auth().listUsers(1000);
