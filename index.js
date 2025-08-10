@@ -42,7 +42,7 @@ app.post('/payment/initialize', async (req, res) => {
         });
         
         res.status(200).json(response.data);
-    } catch (error) { // <-- THIS BLOCK IS NOW CORRECTED
+    } catch (error) {
         console.error('VelvPay Initialization Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
     }
