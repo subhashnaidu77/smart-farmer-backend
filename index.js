@@ -4,82 +4,62 @@ const axios = require('axios');
 require('dotenv').config();
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE ADMIN SETUP (No changes here) ---
 const serviceAccount = require('./serviceAccountKey.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 const db = admin.firestore();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-
-// --- 2. PAYMENT API CONFIG (THIS SECTION IS UPDATED) ---
-// We now use the VELVPAY key from your .env file
+// const ERCASPAY_SECRET_KEY = process.env.ERCASPAY_SECRET_KEY;
+// const API_BASE_URL = 'https://api.paystack.co';
 const VELVPAY_SECRET_KEY = process.env.VELVPAY_SECRET_KEY; 
 // This is the assumed API URL for VelvPay. Please verify from their official documentation.
 const API_BASE_URL = 'https://api.velvpay.com/v1'; 
 
-console.log("Backend configured for VelvPay.");
-
-
-// --- 3. API ENDPOINTS ---
-
-// A. PAYMENT ENDPOINTS (THIS SECTION IS UPDATED)
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
-
-        // The API call is now sent to VelvPay's URL with VelvPay's key
         const response = await axios.post(`${API_BASE_URL}/transaction/initialize`, {
             email: email,
             amount: Math.round(amount * 100),
-            callback_url: callbackUrl
+            callback_url: callbackUrl,
+            currency: "NGN" // Explicitly set currency to NGN
         }, {
             headers: { Authorization: `Bearer ${VELVPAY_SECRET_KEY}` }
         });
-        
         res.status(200).json(response.data);
     } catch (error) {
-        console.error('VelvPay Initialization Error:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
+        console.error('Payment Initialization Error:', error.response ? error.response.data : error.message);
+        res.status(500).json({ message: 'Failed to initialize payment.' });
     }
 });
 
 app.get('/payment/verify/:reference', async (req, res) => {
     try {
         const { reference } = req.params;
-        // This verification call also uses the new URL and Key
-        const response = await axios.get(`${API_BASE_URL}/transaction/verify/${reference}`, { headers: { Authorization: `Bearer ${VELVPAY_SECRET_KEY}` } });
-        
-        // This part assumes VelvPay's response is similar to Paystack's.
-        // You may need to adjust "response.data.data" based on their documentation.
+        const response = await axios.get(`${API_BASE_URL}/transaction/verify/${reference}`, { headers: { Authorization: `Bearer ${ERCASPAY_SECRET_KEY}` } });
         const { status, amount, customer } = response.data.data;
-
         if (status === 'success') {
             const userQuerySnapshot = await db.collection('users').where('email', '==', customer.email).get();
             if (userQuerySnapshot.empty) { return res.status(404).json({ message: 'User not found.' }); }
             const userDoc = userQuerySnapshot.docs[0];
             const userId = userDoc.id;
             const amountInMainUnit = amount / 100;
-
             await db.collection('users').doc(userId).update({ walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit) });
-            await db.collection('transactions').add({ userId: userId, type: 'Deposit', amount: amountInMainUnit, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Deposit via VelvPay. Reference: ${reference}` });
-            
+            await db.collection('transactions').add({ userId: userId, type: 'Deposit', amount: amountInMainUnit, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Deposit via ErcasPay. Reference: ${reference}` });
             res.status(200).json({ message: 'Payment verified successfully.' });
         } else {
             res.status(400).json({ message: 'Payment verification failed.' });
         }
     } catch (error) {
-        console.error('VelvPay Verification Error:', error.response ? error.response.data : error.message);
+        console.error('Payment Verification Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Error during payment verification.' });
     }
 });
 
-
-// B. ADMIN & SYSTEM ENDPOINTS (These sections have no changes)
 app.get('/admin/users', async (req, res) => {
     try {
         const userRecords = await admin.auth().listUsers(1000);
@@ -115,17 +95,13 @@ app.get('/admin/withdrawals', async (req, res) => {
         const snapshot = await db.collection('withdrawals').orderBy('createdAt', 'desc').get();
         const withdrawals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(withdrawals);
-    } catch (error) {
-        console.error('Error fetching withdrawals:', error);
-        res.status(500).json({ message: 'Failed to fetch withdrawal requests.' });
-    }
+    } catch (error) { res.status(500).json({ message: 'Failed to fetch withdrawal requests.' }); }
 });
 
 app.post('/admin/withdrawals/update', async (req, res) => {
     try {
         const { id, status } = req.body;
         if (!id || !status) { return res.status(400).json({ message: 'Request ID and status are required.' }); }
-        
         const withdrawalRef = db.collection('withdrawals').doc(id);
         const withdrawalDoc = await withdrawalRef.get();
         if (!withdrawalDoc.exists) { return res.status(404).json({ message: 'Withdrawal request not found.' }); }
@@ -133,27 +109,17 @@ app.post('/admin/withdrawals/update', async (req, res) => {
         if (status === 'approved') {
             const withdrawalData = withdrawalDoc.data();
             const { amount, userId } = withdrawalData;
-            
             console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
-
             const userRef = db.collection('users').doc(userId);
             const userDoc = await userRef.get();
             if (!userDoc.exists) { return res.status(404).json({ message: 'User not found.' }); }
-
             if (userDoc.data().walletBalance < amount) {
                 await withdrawalRef.update({ status: 'failed', notes: 'Insufficient balance at time of approval.' });
                 return res.status(400).json({ message: 'User has insufficient balance.' });
             }
             await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
             await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
-            await db.collection('transactions').add({
-                userId: userId,
-                type: 'Withdrawal',
-                amount: amount,
-                status: 'Completed',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                details: `Withdrawal to ${withdrawalData.bankDetails.bankName}`
-            });
+            await db.collection('transactions').add({ userId: userId, type: 'Withdrawal', amount: amount, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Withdrawal to ${withdrawalData.bankDetails.bankName}` });
             console.log(`--- PAYOUT SIMULATION FOR USER ${userId} SUCCEEDED ---`);
         } else {
             await withdrawalRef.update({ status: status });
@@ -215,9 +181,6 @@ app.post('/system/process-payouts', async (req, res) => {
     }
 });
 
-
 app.get('/', (req, res) => res.send('Smart Farmer Backend is LIVE!'));
-
-// --- 4. START THE SERVER ---
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`✅ Server is running on port ${PORT}`));
