@@ -40,7 +40,7 @@ app.post('/payment/initialize', async (req, res) => {
 app.get('/payment/verify/:reference', async (req, res) => {
     try {
         const { reference } = req.params;
-        const response = await axios.get(`${API_BASE_URL}/transaction/verify/${reference}`, { headers: { Authorization: `Bearer ${ERCASPAY_SECRET_KEY}` } });
+        const response = await axios.get(`${API_BASE_URL}/transaction/verify/${reference}`, { headers: { Authorization: `Bearer ${VELVPAY_SECRET_KEY}` } });
         const { status, amount, customer } = response.data.data;
         if (status === 'success') {
             const userQuerySnapshot = await db.collection('users').where('email', '==', customer.email).get();
