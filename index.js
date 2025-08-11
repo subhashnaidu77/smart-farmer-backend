@@ -23,7 +23,15 @@ console.log("Backend configured for VelvPay with Webhook.");
 
 // --- 3. HELPER FUNCTION ---
 const generateVelvPayHeaders = () => {
-    // ... (This function remains the same)
+    const referenceId = uuidv4();
+    const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
+    const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
+    return {
+        'api-key': encryptedToken,
+        'public-key': VELVPAY_PUBLIC_KEY,
+        'reference-id': referenceId,
+        'Content-Type': 'application/json'
+    };
 };
 
 // --- 4. API ENDPOINTS ---
@@ -94,7 +102,6 @@ app.post('/payment/webhook', async (req, res) => {
         res.status(500).send('Error processing webhook.');
     }
 });
-
 // B. ADMIN & SYSTEM ENDPOINTS (These have no changes)
 app.get('/admin/users', async (req, res) => {
     try {
