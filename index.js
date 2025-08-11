@@ -1,10 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 require('dotenv').config();
 const admin = require('firebase-admin');
-const CryptoJS = require("crypto-js");
-const { v4: uuidv4 } = require('uuid');
+const Velv = require("velv-js"); // Import the official VelvPay SDK
 
 // --- 1. FIREBASE ADMIN SETUP ---
 const serviceAccount = require('./serviceAccountKey.json');
@@ -16,45 +14,53 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- 2. VELVPAY API CONFIG ---
+
+// --- 2. VELVPAY SDK INITIALIZATION ---
 const { VELVPAY_PUBLIC_KEY, VELVPAY_PRIVATE_KEY, VELVPAY_ENCRYPTION_KEY } = process.env;
-const API_BASE_URL = 'https://api.velvpay.com/api/v1/service';
-console.log("Backend configured for VelvPay with Webhook.");
 
-// --- 3. HELPER FUNCTION ---
-const generateVelvPayHeaders = () => {
-    const referenceId = uuidv4();
-    const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
-    const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
-    return {
-        'api-key': encryptedToken,
-        'public-key': VELVPAY_PUBLIC_KEY,
-        'reference-id': referenceId,
-        'Content-Type': 'application/json'
-    };
-};
+if (!VELVPAY_PUBLIC_KEY || !VELVPAY_PRIVATE_KEY || !VELVPAY_ENCRYPTION_KEY) {
+    console.error("FATAL ERROR: One or more VelvPay environment variables are missing.");
+}
 
-// --- 4. API ENDPOINTS ---
+const velv = new Velv({
+  secretKey: VELVPAY_PRIVATE_KEY,
+  publicKey: VELVPAY_PUBLIC_KEY,
+  encryptionKey: VELVPAY_ENCRYPTION_KEY,
+});
 
-// A. PAYMENT INITIALIZATION (No changes here)
+console.log("Backend configured for VelvPay with velv-js SDK.");
+
+
+// --- 3. API ENDPOINTS ---
+
+// A. PAYMENT INITIALIZATION
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
-        const payload = {
-            amount: Math.round(amount * 100),
-            email: email,
-            isNaira: false,
-            callback_url: callbackUrl, // User is redirected here after payment attempt
-            description: "Smart Farmer Wallet Deposit"
+        
+        // Use the SDK's payVirtualAccount method to initiate payment
+        const response = await velv.payVirtualAccount({
+            body: {
+                amount: Math.round(amount * 100), // SDK expects amount in kobo
+                email: email,
+                callback_url: callbackUrl, // The SDK documentation supports this
+                description: "Smart Farmer Wallet Deposit"
+            }
+        });
+
+        // The SDK response structure might be different, we adapt to provide a standard payment link
+        const paymentData = {
+            authorization_url: response.data.link,
+            reference: response.data.reference
         };
-        const headers = generateVelvPayHeaders();
-        const response = await axios.post(`${API_BASE_URL}/payment/cash-craft/initiate`, payload, { headers });
-        res.status(200).json(response.data);
+        
+        res.status(200).json({ status: true, message: "Authorization URL created", data: paymentData });
     } catch (error) {
-        console.error('VelvPay Initialization Error:', error.response ? error.response.data : error.message);
+        console.error('VelvPay SDK Initialization Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
     }
 });
+
 
 // B. ** NEW WEBHOOK ENDPOINT **
 // VelvPay will send a POST request to this URL after a payment is successful.
@@ -76,12 +82,10 @@ app.post('/payment/webhook', async (req, res) => {
             const userId = userDoc.id;
             const amountInMainUnit = amount / 100;
 
-            // Update user's wallet balance
             await db.collection('users').doc(userId).update({
                 walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
             });
 
-            // Log the transaction
             await db.collection('transactions').add({
                 userId: userId,
                 type: 'Deposit',
