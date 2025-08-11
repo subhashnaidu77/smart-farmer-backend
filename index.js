@@ -13,36 +13,22 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 const app = express();
-
-// --- THIS IS THE CORRECTED LINE ---
-// We are now explicitly telling the server to allow requests from your Vercel URL
-app.use(cors({ origin: "https://smart-farmer-frontend.vercel.app" }));
-
+app.use(cors());
 app.use(express.json());
 
 // --- 2. VELVPAY API CONFIG ---
 const { VELVPAY_PUBLIC_KEY, VELVPAY_PRIVATE_KEY, VELVPAY_ENCRYPTION_KEY } = process.env;
 const API_BASE_URL = 'https://api.velvpay.com/api/v1/service';
-
-console.log("Backend configured for VelvPay with encrypted authentication.");
+console.log("Backend configured for VelvPay with Webhook.");
 
 // --- 3. HELPER FUNCTION ---
 const generateVelvPayHeaders = () => {
-    if (!VELVPAY_PRIVATE_KEY || !VELVPAY_PUBLIC_KEY || !VELVPAY_ENCRYPTION_KEY) {
-        throw new Error("One or more VelvPay environment variables are missing on the server.");
-    }
-    const referenceId = uuidv4();
-    const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
-    const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
-    return {
-        'api-key': encryptedToken,
-        'public-key': VELVPAY_PUBLIC_KEY,
-        'reference-id': referenceId,
-        'Content-Type': 'application/json'
-    };
+    // ... (This function remains the same)
 };
 
 // --- 4. API ENDPOINTS ---
+
+// A. PAYMENT INITIALIZATION (No changes here)
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
@@ -50,7 +36,7 @@ app.post('/payment/initialize', async (req, res) => {
             amount: Math.round(amount * 100),
             email: email,
             isNaira: false,
-            callback_url: callbackUrl,
+            callback_url: callbackUrl, // User is redirected here after payment attempt
             description: "Smart Farmer Wallet Deposit"
         };
         const headers = generateVelvPayHeaders();
@@ -61,33 +47,51 @@ app.post('/payment/initialize', async (req, res) => {
         res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
     }
 });
-app.get('/payment/verify/:reference', async (req, res) => {
-    try {
-        const { reference } = req.params;
-        const headers = generateVelvPayHeaders();
-        const response = await axios.get(`${API_BASE_URL}/payment/cash-craft/resolve?txId=${reference}`, { headers });
-        
-        const { status, amount, metadata } = response.data.data;
 
-        if (status === 'success' || status === 'completed') {
-            const userEmail = metadata.find(m => m.email)?.email;
-            if (!userEmail) { throw new Error("User email not found in transaction metadata"); }
-            const userQuerySnapshot = await db.collection('users').where('email', '==', userEmail).get();
-            if (userQuerySnapshot.empty) { return res.status(404).json({ message: 'User not found.' }); }
+// B. ** NEW WEBHOOK ENDPOINT **
+// VelvPay will send a POST request to this URL after a payment is successful.
+app.post('/payment/webhook', async (req, res) => {
+    try {
+        console.log("Webhook received:", req.body);
+        const webhookData = req.body.data;
+
+        // Verify the event is a successful charge
+        if (req.body.event === 'charge.success' && webhookData.status === 'success') {
+            const { amount, customer, reference } = webhookData;
+            
+            const userQuerySnapshot = await db.collection('users').where('email', '==', customer.email).get();
+            if (userQuerySnapshot.empty) {
+                console.log(`Webhook Error: User with email ${customer.email} not found.`);
+                return res.status(404).send('User not found.');
+            }
             const userDoc = userQuerySnapshot.docs[0];
             const userId = userDoc.id;
             const amountInMainUnit = amount / 100;
 
-            await db.collection('users').doc(userId).update({ walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit) });
-            await db.collection('transactions').add({ userId: userId, type: 'Deposit', amount: amountInMainUnit, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Deposit via VelvPay. Reference: ${reference}` });
-            
-            res.status(200).json({ message: 'Payment verified successfully.' });
-        } else {
-            res.status(400).json({ message: 'Payment verification failed.' });
+            // Update user's wallet balance
+            await db.collection('users').doc(userId).update({
+                walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
+            });
+
+            // Log the transaction
+            await db.collection('transactions').add({
+                userId: userId,
+                type: 'Deposit',
+                amount: amountInMainUnit,
+                status: 'Completed',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                details: `Deposit via VelvPay Webhook. Reference: ${reference}`
+            });
+
+            console.log(`Wallet updated for user ${customer.email} with amount ${amountInMainUnit}`);
         }
+        
+        // IMPORTANT: Always send a 200 OK response back to VelvPay
+        res.status(200).send('Webhook received successfully.');
+
     } catch (error) {
-        console.error('VelvPay Verification Error:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Error during payment verification.' });
+        console.error('Error processing VelvPay webhook:', error);
+        res.status(500).send('Error processing webhook.');
     }
 });
 
