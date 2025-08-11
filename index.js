@@ -1,10 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 require('dotenv').config();
 const admin = require('firebase-admin');
-const CryptoJS = require("crypto-js");
-const { v4: uuidv4 } = require('uuid');
+const Velv = require("velv-js"); // Import the official VelvPay SDK
 
 // --- 1. FIREBASE ADMIN SETUP ---
 const serviceAccount = require('./serviceAccountKey.json');
@@ -16,79 +14,151 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- 2. VELVPAY API CONFIG ---
+
+// --- 2. VELVPAY SDK INITIALIZATION ---
 const { VELVPAY_PUBLIC_KEY, VELVPAY_PRIVATE_KEY, VELVPAY_ENCRYPTION_KEY } = process.env;
-const API_BASE_URL = 'https://api.velvpay.com/api/v1/service';
-console.log("Backend configured for VelvPay.");
 
-// --- 3. HELPER FUNCTION ---
-const generateVelvPayHeaders = () => {
-    if (!VELVPAY_PRIVATE_KEY || !VELVPAY_PUBLIC_KEY || !VELVPAY_ENCRYPTION_KEY) {
-        throw new Error("One or more VelvPay environment variables are missing.");
-    }
-    const referenceId = uuidv4();
-    const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
-    const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
-    return {
-        'api-key': encryptedToken,
-        'public-key': VELVPAY_PUBLIC_KEY,
-        'reference-id': referenceId,
-        'Content-Type': 'application/json'
-    };
-};
+if (!VELVPAY_PUBLIC_KEY || !VELVPAY_PRIVATE_KEY || !VELVPAY_ENCRYPTION_KEY) {
+    console.error("FATAL ERROR: One or more VelvPay environment variables are missing.");
+}
 
-// --- 4. API ENDPOINTS ---
+const velv = new Velv({
+  secretKey: VELVPAY_PRIVATE_KEY,
+  publicKey: VELVPAY_PUBLIC_KEY,
+  encryptionKey: VELVPAY_ENCRYPTION_KEY,
+});
+
+console.log("Backend configured for VelvPay with velv-js SDK and Webhook.");
+
+
+// --- 3. API ENDPOINTS ---
 
 // A. PAYMENT INITIALIZATION
 app.post('/payment/initialize', async (req, res) => {
     try {
-        // We no longer need callbackUrl from the frontend
-        const { email, amount } = req.body;
+        const { email, amount, callbackUrl } = req.body;
         
-        // --- THIS IS THE CORRECTED PAYLOAD ---
-        // "callback_url" has been completely removed
-        const payload = {
-            amount: Math.round(amount * 100),
-            email: email,
-            isNaira: false,
-            description: "Smart Farmer Wallet Deposit"
+        // Use the SDK's payVirtualAccount method to initiate payment
+        const response = await velv.payVirtualAccount({
+            body: {
+                amount: Math.round(amount * 100), // SDK expects amount in kobo
+                email: email,
+                callback_url: callbackUrl,
+                description: "Smart Farmer Wallet Deposit"
+            }
+        });
+
+        // The SDK response structure might be different, we adapt to provide a standard payment link
+        const paymentData = {
+            authorization_url: response.data.link,
+            reference: response.data.reference
         };
         
-        const headers = generateVelvPayHeaders();
-        const response = await axios.post(`${API_BASE_URL}/payment/cash-craft/initiate`, payload, { headers });
-        
-        res.status(200).json(response.data);
+        res.status(200).json({ status: true, message: "Authorization URL created", data: paymentData });
     } catch (error) {
-        console.error('VelvPay Initialization Error:', error.response ? error.response.data : error.message);
+        console.error('VelvPay SDK Initialization Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
     }
 });
 
-// B. WEBHOOK ENDPOINT
+
+// B. ** NEW WEBHOOK ENDPOINT **
+// VelvPay will send a POST request to this URL after a payment is successful.
 app.post('/payment/webhook', async (req, res) => {
     try {
         console.log("Webhook received:", req.body);
         const webhookData = req.body.data;
+
+        // Verify the event is a successful charge
         if (req.body.event === 'charge.success' && webhookData.status === 'success') {
             const { amount, customer, reference } = webhookData;
+            
             const userQuerySnapshot = await db.collection('users').where('email', '==', customer.email).get();
             if (userQuerySnapshot.empty) {
+                console.log(`Webhook Error: User with email ${customer.email} not found.`);
                 return res.status(404).send('User not found.');
             }
             const userDoc = userQuerySnapshot.docs[0];
             const userId = userDoc.id;
             const amountInMainUnit = amount / 100;
-            await db.collection('users').doc(userId).update({ walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit) });
-            await db.collection('transactions').add({ userId: userId, type: 'Deposit', amount: amountInMainUnit, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Deposit via VelvPay Webhook. Reference: ${reference}` });
+
+            await db.collection('users').doc(userId).update({
+                walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
+            });
+
+            await db.collection('transactions').add({
+                userId: userId,
+                type: 'Deposit',
+                amount: amountInMainUnit,
+                status: 'Completed',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                details: `Deposit via VelvPay Webhook. Reference: ${reference}`
+            });
+
             console.log(`Wallet updated for user ${customer.email} with amount ${amountInMainUnit}`);
         }
+        
+        // IMPORTANT: Always send a 200 OK response back to VelvPay
         res.status(200).send('Webhook received successfully.');
+
     } catch (error) {
         console.error('Error processing VelvPay webhook:', error);
         res.status(500).send('Error processing webhook.');
     }
 });
-// B. ADMIN & SYSTEM ENDPOINTS (These have no changes)
+
+
+// C. WITHDRAWAL ENDPOINT (With Demo and Live Mode)
+app.post('/admin/withdrawals/update', async (req, res) => {
+    try {
+        const { id, status } = req.body;
+        const withdrawalRef = db.collection('withdrawals').doc(id);
+        const withdrawalDoc = await withdrawalRef.get();
+        if (!withdrawalDoc.exists) { return res.status(404).json({ message: 'Withdrawal request not found.' }); }
+
+        if (status === 'approved') {
+            const withdrawalData = withdrawalDoc.data();
+            const { amount, userId, bankDetails } = withdrawalData;
+            const userRef = db.collection('users').doc(userId);
+            
+            // --- DEMO MODE (For client testing) ---
+            console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
+            await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
+
+            /*
+            // --- LIVE MODE (For Production) ---
+            // UNCOMMENT THIS BLOCK WHEN THE CLIENT'S VELVPAY ACCOUNT IS READY FOR LIVE PAYOUTS
+
+            console.log(`--- PROCESSING LIVE PAYOUT FOR USER ${userId} ---`);
+            // Use the SDK's initiateBankTransfer method
+            await velv.initiateBankTransfer({
+                body: {
+                    amount: amount * 100, // Amount in kobo
+                    bankCode: bankDetails.bankCode, // You will need to add a bank code field in your app
+                    accountNumber: bankDetails.accountNumber,
+                    pin: 1234 // The business's transaction PIN from their VelvPay dashboard
+                }
+            });
+            */
+            
+            // Update our database records
+            await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+            await db.collection('transactions').add({ userId: userId, type: 'Withdrawal', amount: amount, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Withdrawal to ${bankDetails.bankName}` });
+
+            res.status(200).json({ message: `Withdrawal request has been successfully marked as ${status}.` });
+
+        } else { // If status is 'rejected'
+            await withdrawalRef.update({ status: status });
+            res.status(200).json({ message: `Withdrawal request has been marked as ${status}.` });
+        }
+    } catch (error) {
+        console.error('Error updating withdrawal:', error.response ? error.response.data : error.message);
+        res.status(500).json({ message: 'Failed to process withdrawal request.' });
+    }
+});
+
+
+// D. OTHER ADMIN & SYSTEM ENDPOINTS (These have no changes)
 app.get('/admin/users', async (req, res) => {
     try {
         const userRecords = await admin.auth().listUsers(1000);
@@ -100,7 +170,6 @@ app.get('/admin/users', async (req, res) => {
         res.status(200).json(users);
     } catch (error) { res.status(500).json({ message: 'Failed to list users.' }); }
 });
-
 
 app.post('/admin/users/setrole', async (req, res) => {
     try {
@@ -128,50 +197,6 @@ app.get('/admin/withdrawals', async (req, res) => {
     } catch (error) {
         console.error('Error fetching withdrawals:', error);
         res.status(500).json({ message: 'Failed to fetch withdrawal requests.' });
-    }
-});
-
-app.post('/admin/withdrawals/update', async (req, res) => {
-    try {
-        const { id, status } = req.body;
-        if (!id || !status) { return res.status(400).json({ message: 'Request ID and status are required.' }); }
-        
-        const withdrawalRef = db.collection('withdrawals').doc(id);
-        const withdrawalDoc = await withdrawalRef.get();
-        if (!withdrawalDoc.exists) { return res.status(404).json({ message: 'Withdrawal request not found.' }); }
-
-        if (status === 'approved') {
-            const withdrawalData = withdrawalDoc.data();
-            const { amount, userId } = withdrawalData;
-            
-            console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
-
-            const userRef = db.collection('users').doc(userId);
-            const userDoc = await userRef.get();
-            if (!userDoc.exists) { return res.status(404).json({ message: 'User not found.' }); }
-
-            if (userDoc.data().walletBalance < amount) {
-                await withdrawalRef.update({ status: 'failed', notes: 'Insufficient balance at time of approval.' });
-                return res.status(400).json({ message: 'User has insufficient balance.' });
-            }
-            await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
-            await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
-            await db.collection('transactions').add({
-                userId: userId,
-                type: 'Withdrawal',
-                amount: amount,
-                status: 'Completed',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                details: `Withdrawal to ${withdrawalData.bankDetails.bankName}`
-            });
-            console.log(`--- PAYOUT SIMULATION FOR USER ${userId} SUCCEEDED ---`);
-        } else {
-            await withdrawalRef.update({ status: status });
-        }
-        res.status(200).json({ message: `Withdrawal request has been successfully marked as ${status}.` });
-    } catch (error) {
-        console.error('Error updating withdrawal:', error);
-        res.status(500).json({ message: 'Failed to process withdrawal request.' });
     }
 });
 
@@ -224,6 +249,7 @@ app.post('/system/process-payouts', async (req, res) => {
         res.status(500).json({ message: 'An error occurred during payout processing.' });
     }
 });
+
 
 app.get('/', (req, res) => res.send('Smart Farmer Backend is LIVE!'));
 
