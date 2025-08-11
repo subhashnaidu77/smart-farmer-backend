@@ -23,6 +23,10 @@ console.log("Backend configured for VelvPay with encrypted authentication.");
 
 // --- 3. HELPER FUNCTION ---
 const generateVelvPayHeaders = () => {
+    // This function will now throw a clear error if keys are missing
+    if (!VELVPAY_PRIVATE_KEY || !VELVPAY_PUBLIC_KEY || !VELVPAY_ENCRYPTION_KEY) {
+        throw new Error("One or more VelvPay environment variables are missing on the server.");
+    }
     const referenceId = uuidv4();
     const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
     const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
@@ -39,24 +43,24 @@ const generateVelvPayHeaders = () => {
 // A. PAYMENT ENDPOINTS
 app.post('/payment/initialize', async (req, res) => {
     try {
-        const { email, amount, callbackUrl } = req.body;
+        const { email, amount } = req.body;
         
+        // --- THIS IS THE CORRECTED PAYLOAD ---
+        // The "callbackUrl" has been removed as per the VelvPay error message
         const payload = {
             amount: Math.round(amount * 100),
             email: email,
             isNaira: false,
-            description: "Smart Farmer Wallet Deposit",
-            // As per VelvPay docs, this field is needed for redirection after payment
-            callback: callbackUrl 
+            description: "Smart Farmer Wallet Deposit"
         };
         
         const headers = generateVelvPayHeaders();
-        
-        // --- THIS IS THE CORRECTED ENDPOINT ---
+        // The endpoint is /payment/cash-craft/initiate as per docs
         const response = await axios.post(`${API_BASE_URL}/payment/cash-craft/initiate`, payload, { headers });
         
+        // Adapt the response to provide a standard payment link
         const paymentData = {
-            authorization_url: response.data.data.link, // Use the link from the response
+            authorization_url: response.data.data.link,
             reference: response.data.data.reference
         };
 
@@ -64,7 +68,7 @@ app.post('/payment/initialize', async (req, res) => {
 
     } catch (error) {
         console.error('VelvPay Initialization Error:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
+        res.status(500).json({ message: error.message || 'Failed to initialize payment with VelvPay.' });
     }
 });
 
@@ -72,7 +76,6 @@ app.get('/payment/verify/:reference', async (req, res) => {
     try {
         const { reference } = req.params;
         const headers = generateVelvPayHeaders();
-
         const response = await axios.get(`${API_BASE_URL}/payment/cash-craft/resolve?txId=${reference}`, { headers });
         
         const { status, amount, metadata } = response.data.data;
