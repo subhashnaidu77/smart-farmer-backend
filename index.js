@@ -6,30 +6,43 @@ const admin = require('firebase-admin');
 const CryptoJS = require("crypto-js");
 const { v4: uuidv4 } = require('uuid');
 
+// --- 1. FIREBASE ADMIN SETUP ---
 const serviceAccount = require('./serviceAccountKey.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
 const db = admin.firestore();
 const app = express();
-app.use(cors());
+
+// --- THIS IS THE CORRECTED LINE ---
+// We are now explicitly telling the server to allow requests from your Vercel URL
+app.use(cors({ origin: "https://smart-farmer-frontend.vercel.app" }));
+
 app.use(express.json());
 
+// --- 2. VELVPAY API CONFIG ---
 const { VELVPAY_PUBLIC_KEY, VELVPAY_PRIVATE_KEY, VELVPAY_ENCRYPTION_KEY } = process.env;
 const API_BASE_URL = 'https://api.velvpay.com/api/v1/service';
 
 console.log("Backend configured for VelvPay with encrypted authentication.");
 
+// --- 3. HELPER FUNCTION ---
 const generateVelvPayHeaders = () => {
     if (!VELVPAY_PRIVATE_KEY || !VELVPAY_PUBLIC_KEY || !VELVPAY_ENCRYPTION_KEY) {
-        throw new Error("One or more VelvPay environment variables are missing.");
+        throw new Error("One or more VelvPay environment variables are missing on the server.");
     }
     const referenceId = uuidv4();
     const authorizationString = VELVPAY_PRIVATE_KEY + VELVPAY_PUBLIC_KEY + referenceId;
     const encryptedToken = CryptoJS.AES.encrypt(authorizationString, VELVPAY_ENCRYPTION_KEY).toString();
-    return { 'api-key': encryptedToken, 'public-key': VELVPAY_PUBLIC_KEY, 'reference-id': referenceId, 'Content-Type': 'application/json' };
+    return {
+        'api-key': encryptedToken,
+        'public-key': VELVPAY_PUBLIC_KEY,
+        'reference-id': referenceId,
+        'Content-Type': 'application/json'
+    };
 };
 
+// --- 4. API ENDPOINTS ---
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
