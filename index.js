@@ -84,38 +84,25 @@ app.post('/payment/initialize', async (req, res) => {
 // B. WEBHOOK ENDPOINT with Full Logging
 // B. WEBHOOK ENDPOINT with Full Logging and Status Update
 // VelvPay Webhook Endpoint
-app.post('/payment/webhook', async (req, res) => {
+app.post('/payment/webhook', express.json({ type: '*/*' }), async (req, res) => {
     try {
+        const { status, amount, metadata } = req.body;
         console.log("✅ Webhook request received:", req.body);
 
-        const { status, amount, metadata } = req.body;
-
         if (status === 'successful' && metadata?.userId) {
-            const amountInMainUnit = amount / 100;
-
-            await db.collection('users').doc(metadata.userId).update({
-                walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
+            const userRef = doc(db, 'users', metadata.userId);
+            await updateDoc(userRef, {
+                walletBalance: increment(amount / 100) // convert kobo → naira
             });
-
-            await db.collection('transactions').add({
-                userId: metadata.userId,
-                type: 'Deposit',
-                amount: amountInMainUnit,
-                status: 'Completed',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                details: 'Deposit via VelvPay Webhook'
-            });
-
-            console.log(`✅ Wallet updated for ${metadata.userId} by ${amountInMainUnit}`);
-            return res.status(200).send('Wallet updated successfully.');
+            console.log(`💰 Wallet updated for user: ${metadata.userId}`);
+            return res.status(200).send('Success');
         }
 
-        console.warn("❌ Invalid webhook data");
-        res.status(400).send('Invalid webhook payload');
-
+        console.log("❌ Invalid webhook data");
+        return res.status(400).send('Invalid data');
     } catch (error) {
-        console.error('❌ Error processing webhook:', error);
-        res.status(500).send('Error processing webhook.');
+        console.error("❌ Webhook error:", error);
+        res.status(500).send('Server error');
     }
 });
 
