@@ -82,60 +82,64 @@ app.post('/payment/initialize', async (req, res) => {
 });
 
 // B. WEBHOOK ENDPOINT with Full Logging
+// B. WEBHOOK ENDPOINT with Full Logging and Status Update
 app.post('/payment/webhook', async (req, res) => {
     try {
         console.log("=== VelvPay Webhook Received ===");
         console.log("Full Body:", JSON.stringify(req.body, null, 2));
 
         const webhookData = req.body.data;
-        console.log("Parsed Webhook Data:", webhookData);
+        const referenceId = webhookData?.reference;
+        const email = webhookData?.customer?.email;
+        const amount = webhookData?.amount / 100;
 
-        // Verify the event is a successful charge
+        if (!referenceId || !email) {
+            console.error("❌ Missing referenceId or email in webhook payload.");
+            return res.status(400).send("Invalid webhook payload.");
+        }
+
+        // Check payment status
+        let newStatus;
         if (req.body.event === 'charge.success' && webhookData?.status === 'success') {
-            const { amount, customer, reference } = webhookData;
-            console.log(`Payment SUCCESS: ${amount} from ${customer.email}, Ref: ${reference}`);
+            newStatus = 'Completed';
 
-            // Find user by email in Firestore
-            const userQuerySnapshot = await db.collection('users').where('email', '==', customer.email).get();
-            if (userQuerySnapshot.empty) {
-                console.error(`Webhook Error: User with email ${customer.email} not found in Firestore.`);
-                return res.status(404).send('User not found.');
+            // Update user's wallet balance
+            const userQuery = await db.collection('users').where('email', '==', email).get();
+            if (!userQuery.empty) {
+                const userDoc = userQuery.docs[0];
+                await db.collection('users').doc(userDoc.id).update({
+                    walletBalance: admin.firestore.FieldValue.increment(amount)
+                });
+            } else {
+                console.error(`⚠️ No user found with email: ${email}`);
             }
 
-            const userDoc = userQuerySnapshot.docs[0];
-            const userId = userDoc.id;
-            const amountInMainUnit = amount / 100;
-
-            // Update wallet balance
-            await db.collection('users').doc(userId).update({
-                walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
-            });
-
-            // Save transaction record
-            await db.collection('transactions').add({
-                userId: userId,
-                type: 'Deposit',
-                amount: amountInMainUnit,
-                status: 'Completed',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                details: `Deposit via VelvPay Webhook. Reference: ${reference}`
-            });
-
-            console.log(`✅ Wallet updated for ${customer.email} by ${amountInMainUnit}`);
+        } else if (webhookData?.status === 'failed') {
+            newStatus = 'Failed';
         } else {
-            console.warn(`⚠️ Webhook ignored: Event: ${req.body.event}, Status: ${webhookData?.status}`);
+            newStatus = 'Pending';
         }
-        
-        // Always send 200 so VelvPay doesn't retry
-        res.status(200).send('Webhook received successfully.');
 
+        // Update the existing transaction status
+        const txnQuery = await db.collection('transactions').where('referenceId', '==', referenceId).get();
+        if (!txnQuery.empty) {
+            const txnDocId = txnQuery.docs[0].id;
+            await db.collection('transactions').doc(txnDocId).update({
+                status: newStatus,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                details: `Updated via VelvPay Webhook - ${newStatus}`
+            });
+            console.log(`✅ Transaction ${referenceId} updated to: ${newStatus}`);
+        } else {
+            console.warn(`⚠️ No transaction found for referenceId: ${referenceId}`);
+        }
+
+        res.status(200).send('Webhook processed successfully.');
     } catch (error) {
         console.error('❌ Error processing VelvPay webhook:', error);
         res.status(500).send('Error processing webhook.');
     }
 });
-
-
 
 // C. WITHDRAWAL ENDPOINT (With Demo and Live Mode)
 
