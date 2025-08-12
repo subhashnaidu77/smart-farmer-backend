@@ -157,12 +157,22 @@ app.get('/admin/transactions', async (req, res) => {
         const snapshot = await db.collection('transactions').orderBy('createdAt', 'desc').get();
         const transactionsPromises = snapshot.docs.map(async (doc) => {
             const transaction = { id: doc.id, ...doc.data() };
-            const userRecord = await admin.auth().getUser(transaction.userId);
-            return { ...transaction, email: userRecord.email };
+            try {
+                // This will safely fetch user data and handle cases where the user might have been deleted
+                const userRecord = await admin.auth().getUser(transaction.userId);
+                return { ...transaction, email: userRecord.email };
+            } catch (error) {
+                // If the user was deleted, we'll still show the transaction but with a placeholder email
+                console.warn(`Could not find user for transaction ${transaction.id}. User ID: ${transaction.userId}`);
+                return { ...transaction, email: 'User Deleted' };
+            }
         });
         const transactions = await Promise.all(transactionsPromises);
         res.status(200).json(transactions);
-    } catch (error) { res.status(500).json({ message: 'Failed to fetch transactions.' }); }
+    } catch (error) {
+        console.error('Error fetching transactions:', error);
+        res.status(500).json({ message: 'Failed to fetch transactions.' });
+    }
 });
 
 app.post('/system/process-payouts', async (req, res) => {
@@ -210,6 +220,10 @@ app.get('/admin/manual-deposits', async (req, res) => {
         res.status(200).json(deposits);
     } catch (error) {
         console.error('Error fetching manual deposits:', error);
+        // This will now send back the specific index creation link if it's missing
+        if (error.details && error.details.includes("The query requires an index")) {
+            return res.status(500).json({ message: 'Firestore index is missing.', details: error.details });
+        }
         res.status(500).json({ message: 'Failed to fetch deposit requests.' });
     }
 });
