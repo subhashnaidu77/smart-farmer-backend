@@ -37,30 +37,48 @@ console.log("Backend configured for VelvPay with velv-js SDK and Webhook.");
 app.post('/payment/initialize', async (req, res) => {
     try {
         const { email, amount, callbackUrl } = req.body;
-        
-        // Use the SDK's payVirtualAccount method to initiate payment
-        const response = await velv.payVirtualAccount({
+
+        // 1. Generate a unique reference ID
+        const referenceId = `SF-${Date.now()}-${uuidv4()}`;
+
+        // 2. Prepare payment request
+        const response = await velv.initiatePayment({
+            referenceId,
             body: {
-                amount: Math.round(amount * 100), // SDK expects amount in kobo
-                email: email,
-                callback_url: callbackUrl,
+                amount: Math.round(amount * 100), // amount in kobo
+                title: "Payment for Smart Farmer",
+                redirectUrl: callbackUrl || `https://smartfarmer.com/payment/confirmation?ref=${referenceId}`,
                 description: "Smart Farmer Wallet Deposit"
             }
         });
 
-        // The SDK response structure might be different, we adapt to provide a standard payment link
+        // 3. Store transaction request in Firestore before redirect
+        await db.collection('transactions').add({
+            email,
+            referenceId,
+            amount,
+            status: 'Pending',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            details: "Initialized via VelvPay"
+        });
+
+        // 4. Format response for frontend
         const paymentData = {
-            authorization_url: response.data.link,
-            reference: response.data.reference
+            authorization_url: response.link || response.data?.link,
+            short: response.short
         };
-        
-        res.status(200).json({ status: true, message: "Authorization URL created", data: paymentData });
+
+        res.status(200).json({
+            status: true,
+            message: "Authorization URL created",
+            data: paymentData
+        });
+
     } catch (error) {
         console.error('VelvPay SDK Initialization Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Failed to initialize payment with VelvPay.' });
     }
 });
-
 
 // B. ** NEW WEBHOOK ENDPOINT **
 // VelvPay will send a POST request to this URL after a payment is successful.
@@ -109,53 +127,6 @@ app.post('/payment/webhook', async (req, res) => {
 
 
 // C. WITHDRAWAL ENDPOINT (With Demo and Live Mode)
-app.post('/admin/withdrawals/update', async (req, res) => {
-    try {
-        const { id, status } = req.body;
-        const withdrawalRef = db.collection('withdrawals').doc(id);
-        const withdrawalDoc = await withdrawalRef.get();
-        if (!withdrawalDoc.exists) { return res.status(404).json({ message: 'Withdrawal request not found.' }); }
-
-        if (status === 'approved') {
-            const withdrawalData = withdrawalDoc.data();
-            const { amount, userId, bankDetails } = withdrawalData;
-            const userRef = db.collection('users').doc(userId);
-            
-            // --- DEMO MODE (For client testing) ---
-            console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
-            await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
-
-            /*
-            // --- LIVE MODE (For Production) ---
-            // UNCOMMENT THIS BLOCK WHEN THE CLIENT'S VELVPAY ACCOUNT IS READY FOR LIVE PAYOUTS
-
-            console.log(`--- PROCESSING LIVE PAYOUT FOR USER ${userId} ---`);
-            // Use the SDK's initiateBankTransfer method
-            await velv.initiateBankTransfer({
-                body: {
-                    amount: amount * 100, // Amount in kobo
-                    bankCode: bankDetails.bankCode, // You will need to add a bank code field in your app
-                    accountNumber: bankDetails.accountNumber,
-                    pin: 1234 // The business's transaction PIN from their VelvPay dashboard
-                }
-            });
-            */
-            
-            // Update our database records
-            await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
-            await db.collection('transactions').add({ userId: userId, type: 'Withdrawal', amount: amount, status: 'Completed', createdAt: admin.firestore.FieldValue.serverTimestamp(), details: `Withdrawal to ${bankDetails.bankName}` });
-
-            res.status(200).json({ message: `Withdrawal request has been successfully marked as ${status}.` });
-
-        } else { // If status is 'rejected'
-            await withdrawalRef.update({ status: status });
-            res.status(200).json({ message: `Withdrawal request has been marked as ${status}.` });
-        }
-    } catch (error) {
-        console.error('Error updating withdrawal:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Failed to process withdrawal request.' });
-    }
-});
 
 
 // D. OTHER ADMIN & SYSTEM ENDPOINTS (These have no changes)
