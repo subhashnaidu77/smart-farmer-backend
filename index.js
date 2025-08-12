@@ -201,7 +201,27 @@ app.post('/system/process-payouts', async (req, res) => {
         res.status(500).json({ message: 'An error occurred during payout processing.' });
     }
 });
+app.post('/deposits/request', async (req, res) => {
+    try {
+        const { userId, amount, senderName } = req.body;
+        if (!userId || !amount || !senderName) {
+            return res.status(400).json({ message: 'Missing required fields.' });
+        }
 
+        await db.collection('deposits').add({
+            userId,
+            amount: Number(amount),
+            senderName,
+            status: 'pending', // All new requests are pending
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        res.status(201).json({ message: 'Deposit request submitted successfully.' });
+    } catch (error) {
+        console.error("Error creating deposit request:", error);
+        res.status(500).json({ message: 'Server error while creating request.' });
+    }
+});
 
 app.get('/', (req, res) => res.send('Smart Farmer Backend is LIVE!'));
 
