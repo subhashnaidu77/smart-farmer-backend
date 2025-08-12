@@ -83,63 +83,48 @@ app.post('/payment/initialize', async (req, res) => {
 
 // B. WEBHOOK ENDPOINT with Full Logging
 // B. WEBHOOK ENDPOINT with Full Logging and Status Update
-app.post('/payment/webhook', async (req, res) => {
+// VelvPay Webhook Endpoint
+app.post("/payment/webhook", express.json(), async (req, res) => {
     try {
-        console.log("=== VelvPay Webhook Received ===");
-        console.log("Full Body:", JSON.stringify(req.body, null, 2));
+        console.log("✅ Webhook request received:", req.body);
 
-        const webhookData = req.body.data;
-        const referenceId = webhookData?.reference;
-        const email = webhookData?.customer?.email;
-        const amount = webhookData?.amount / 100;
+        const { reference, status, amount, email } = req.body;
 
-        if (!referenceId || !email) {
-            console.error("❌ Missing referenceId or email in webhook payload.");
-            return res.status(400).send("Invalid webhook payload.");
+        // 1️⃣ Webhook health check
+        if (!reference || !status) {
+            console.log("❌ Invalid webhook data");
+            return res.status(400).json({ message: "Invalid webhook data" });
         }
 
-        // Check payment status
-        let newStatus;
-        if (req.body.event === 'charge.success' && webhookData?.status === 'success') {
-            newStatus = 'Completed';
+        // 2️⃣ Check payment status
+        if (status.toLowerCase() === "success" || status.toLowerCase() === "successful") {
+            console.log(`💰 Payment SUCCESS for reference ${reference}`);
 
-            // Update user's wallet balance
-            const userQuery = await db.collection('users').where('email', '==', email).get();
-            if (!userQuery.empty) {
-                const userDoc = userQuery.docs[0];
-                await db.collection('users').doc(userDoc.id).update({
-                    walletBalance: admin.firestore.FieldValue.increment(amount)
-                });
-            } else {
-                console.error(`⚠️ No user found with email: ${email}`);
-            }
+            // 📝 Example: Firebase Wallet Update
+            const userId = email; // Replace if you have mapping email -> UID
+            const incrementAmount = amount / 100; // VelvPay might send amount in kobo/paisa
 
-        } else if (webhookData?.status === 'failed') {
-            newStatus = 'Failed';
+            // Update Firebase
+            await admin.firestore().collection("wallets").doc(userId).set(
+                { balance: admin.firestore.FieldValue.increment(incrementAmount) },
+                { merge: true }
+            );
+
+            console.log(`🔥 Wallet updated for user: ${userId}, +${incrementAmount}`);
+        } else if (status.toLowerCase() === "failed") {
+            console.log(`⚠️ Payment FAILED for reference ${reference}`);
         } else {
-            newStatus = 'Pending';
+            console.log(`⏳ Payment PENDING for reference ${reference}`);
         }
 
-        // Update the existing transaction status
-        const txnQuery = await db.collection('transactions').where('referenceId', '==', referenceId).get();
-        if (!txnQuery.empty) {
-            const txnDocId = txnQuery.docs[0].id;
-            await db.collection('transactions').doc(txnDocId).update({
-                status: newStatus,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                details: `Updated via VelvPay Webhook - ${newStatus}`
-            });
-            console.log(`✅ Transaction ${referenceId} updated to: ${newStatus}`);
-        } else {
-            console.warn(`⚠️ No transaction found for referenceId: ${referenceId}`);
-        }
+        res.status(200).json({ message: "Webhook processed" });
 
-        res.status(200).send('Webhook processed successfully.');
-    } catch (error) {
-        console.error('❌ Error processing VelvPay webhook:', error);
-        res.status(500).send('Error processing webhook.');
+    } catch (err) {
+        console.error("❌ Webhook processing error:", err);
+        res.status(500).json({ message: "Internal server error" });
     }
 });
+
 
 // C. WITHDRAWAL ENDPOINT (With Demo and Live Mode)
 
