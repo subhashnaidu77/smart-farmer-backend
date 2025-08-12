@@ -84,44 +84,38 @@ app.post('/payment/initialize', async (req, res) => {
 // B. WEBHOOK ENDPOINT with Full Logging
 // B. WEBHOOK ENDPOINT with Full Logging and Status Update
 // VelvPay Webhook Endpoint
-app.post("/payment/webhook", express.json(), async (req, res) => {
+app.post('/payment/webhook', async (req, res) => {
     try {
         console.log("✅ Webhook request received:", req.body);
 
-        const { reference, status, amount, email } = req.body;
+        const { status, amount, metadata } = req.body;
 
-        // 1️⃣ Webhook health check
-        if (!reference || !status) {
-            console.log("❌ Invalid webhook data");
-            return res.status(400).json({ message: "Invalid webhook data" });
+        if (status === 'successful' && metadata?.userId) {
+            const amountInMainUnit = amount / 100;
+
+            await db.collection('users').doc(metadata.userId).update({
+                walletBalance: admin.firestore.FieldValue.increment(amountInMainUnit)
+            });
+
+            await db.collection('transactions').add({
+                userId: metadata.userId,
+                type: 'Deposit',
+                amount: amountInMainUnit,
+                status: 'Completed',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                details: 'Deposit via VelvPay Webhook'
+            });
+
+            console.log(`✅ Wallet updated for ${metadata.userId} by ${amountInMainUnit}`);
+            return res.status(200).send('Wallet updated successfully.');
         }
 
-        // 2️⃣ Check payment status
-        if (status.toLowerCase() === "success" || status.toLowerCase() === "successful") {
-            console.log(`💰 Payment SUCCESS for reference ${reference}`);
+        console.warn("❌ Invalid webhook data");
+        res.status(400).send('Invalid webhook payload');
 
-            // 📝 Example: Firebase Wallet Update
-            const userId = email; // Replace if you have mapping email -> UID
-            const incrementAmount = amount / 100; // VelvPay might send amount in kobo/paisa
-
-            // Update Firebase
-            await admin.firestore().collection("wallets").doc(userId).set(
-                { balance: admin.firestore.FieldValue.increment(incrementAmount) },
-                { merge: true }
-            );
-
-            console.log(`🔥 Wallet updated for user: ${userId}, +${incrementAmount}`);
-        } else if (status.toLowerCase() === "failed") {
-            console.log(`⚠️ Payment FAILED for reference ${reference}`);
-        } else {
-            console.log(`⏳ Payment PENDING for reference ${reference}`);
-        }
-
-        res.status(200).json({ message: "Webhook processed" });
-
-    } catch (err) {
-        console.error("❌ Webhook processing error:", err);
-        res.status(500).json({ message: "Internal server error" });
+    } catch (error) {
+        console.error('❌ Error processing webhook:', error);
+        res.status(500).send('Error processing webhook.');
     }
 });
 
