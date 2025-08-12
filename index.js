@@ -3,6 +3,7 @@ const cors = require('cors');
 require('dotenv').config();
 const admin = require('firebase-admin');
 const Velv = require("velv-js"); // Import the official VelvPay SDK
+const { v4: uuidv4 } = require('uuid');
 
 // --- 1. FIREBASE ADMIN SETUP ---
 const serviceAccount = require('./serviceAccountKey.json');
