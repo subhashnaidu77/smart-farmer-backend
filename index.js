@@ -201,25 +201,58 @@ app.post('/system/process-payouts', async (req, res) => {
         res.status(500).json({ message: 'An error occurred during payout processing.' });
     }
 });
-app.post('/deposits/request', async (req, res) => {
+
+
+app.get('/admin/manual-deposits', async (req, res) => {
     try {
-        const { userId, amount, senderName } = req.body;
-        if (!userId || !amount || !senderName) {
+        const snapshot = await db.collection('manual_deposits').where('status', '==', 'pending').orderBy('createdAt', 'desc').get();
+        const deposits = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.status(200).json(deposits);
+    } catch (error) {
+        console.error('Error fetching manual deposits:', error);
+        res.status(500).json({ message: 'Failed to fetch deposit requests.' });
+    }
+});
+app.post('/admin/manual-deposits/update', async (req, res) => {
+    try {
+        const { id, status, userId, amount } = req.body;
+        if (!id || !status || !userId || !amount) {
             return res.status(400).json({ message: 'Missing required fields.' });
         }
+        
+        const depositRef = db.collection('manual_deposits').doc(id);
 
-        await db.collection('deposits').add({
-            userId,
-            amount: Number(amount),
-            senderName,
-            status: 'pending', // All new requests are pending
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+        if (status === 'approved') {
+            const userRef = db.collection('users').doc(userId);
+            
+            // Use a transaction to ensure both operations succeed or fail together
+            await db.runTransaction(async (transaction) => {
+                // 1. Add the amount to the user's wallet
+                transaction.update(userRef, { walletBalance: admin.firestore.FieldValue.increment(Number(amount)) });
+                
+                // 2. Log the transaction in the main transaction history
+                const transactionRef = db.collection('transactions').doc();
+                transaction.set(transactionRef, {
+                    userId: userId,
+                    type: 'Deposit',
+                    amount: Number(amount),
+                    status: 'Completed',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    details: `Manual deposit approved by admin.`
+                });
 
-        res.status(201).json({ message: 'Deposit request submitted successfully.' });
+                // 3. Update the deposit request's status
+                transaction.update(depositRef, { status: 'approved' });
+            });
+
+        } else { // If status is 'rejected'
+            await depositRef.update({ status: 'rejected' });
+        }
+
+        res.status(200).json({ message: `Deposit request has been ${status}.` });
     } catch (error) {
-        console.error("Error creating deposit request:", error);
-        res.status(500).json({ message: 'Server error while creating request.' });
+        console.error('Error updating manual deposit:', error);
+        res.status(500).json({ message: 'Failed to process deposit request.' });
     }
 });
 
