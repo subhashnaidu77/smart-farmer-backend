@@ -151,6 +151,56 @@ app.get('/admin/withdrawals', async (req, res) => {
         res.status(500).json({ message: 'Failed to fetch withdrawal requests.' });
     }
 });
+app.post('/admin/withdrawals/update', async (req, res) => {
+    try {
+        const { id, status } = req.body;
+        if (!id || !status) { return res.status(400).json({ message: 'Request ID and status are required.' }); }
+        
+        const withdrawalRef = db.collection('withdrawals').doc(id);
+        const withdrawalDoc = await withdrawalRef.get();
+        if (!withdrawalDoc.exists) { return res.status(404).json({ message: 'Withdrawal request not found.' }); }
+
+        if (status === 'approved') {
+            const withdrawalData = withdrawalDoc.data();
+            const { amount, userId } = withdrawalData;
+
+            // ** THIS IS THE NEW SAFETY CHECK **
+            if (!userId) {
+                console.error(`CRITICAL ERROR: Withdrawal request ${id} is missing a userId.`);
+                // Mark the request as failed so it doesn't get processed again
+                await withdrawalRef.update({ status: 'failed', notes: 'Request was missing user ID.' });
+                return res.status(400).json({ message: 'Withdrawal request is invalid (missing userId).' });
+            }
+            
+            console.log(`--- SIMULATING PAYOUT FOR USER ${userId} ---`);
+            const userRef = db.collection('users').doc(userId);
+            const userDoc = await userRef.get();
+            if (!userDoc.exists) { return res.status(404).json({ message: 'User not found.' }); }
+
+            if (userDoc.data().walletBalance < amount) {
+                await withdrawalRef.update({ status: 'failed', notes: 'Insufficient balance at time of approval.' });
+                return res.status(400).json({ message: 'User has insufficient balance.' });
+            }
+            await userRef.update({ walletBalance: admin.firestore.FieldValue.increment(-amount) });
+            await withdrawalRef.update({ status: 'approved', processedAt: admin.firestore.FieldValue.serverTimestamp() });
+            await db.collection('transactions').add({
+                userId: userId,
+                type: 'Withdrawal',
+                amount: amount,
+                status: 'Completed',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                details: `Withdrawal to ${withdrawalData.bankDetails.bankName}`
+            });
+            console.log(`--- PAYOUT SIMULATION FOR USER ${userId} SUCCEEDED ---`);
+        } else {
+            await withdrawalRef.update({ status: status });
+        }
+        res.status(200).json({ message: `Withdrawal request has been successfully marked as ${status}.` });
+    } catch (error) {
+        console.error('Error updating withdrawal:', error);
+        res.status(500).json({ message: 'Failed to process withdrawal request.' });
+    }
+});
 
 app.get('/admin/transactions', async (req, res) => {
     try {
